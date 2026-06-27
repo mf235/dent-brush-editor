@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Dent Brush Editor v0.3.6
+Dent Brush Editor v0.3.8
 ブラシでなぞった部分に凹み・食い込み風の陰影と変位を付ける画像編集ツール。
 
 Required libraries:
@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Callable, Dict, Iterable, List, Optional, Tuple
 
 APP_NAME = "Dent Brush Editor"
-APP_VERSION = "0.3.6"
+APP_VERSION = "0.3.8"
 SETTINGS_NAME = "dent-brush-editor-settings.json"
 SUPPORTED_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
 DEFAULT_CENTER_LINE_COLOR = "#000000"
@@ -1773,6 +1773,26 @@ class MainWindow(QMainWindow):
             self._save_settings()
             self.statusBar().showMessage(f"中心線の色を変更しました: {self.center_line_color}", 3000)
 
+    def _move_center_line_color_dialog(self, dialog: QColorDialog) -> None:
+        anchor_widget = self.center_line_color_edit
+        anchor_top = anchor_widget.mapToGlobal(QPoint(0, 0))
+        option_left_widget = getattr(self, "controls_host", self.sidebar)
+        option_left = option_left_widget.mapToGlobal(QPoint(0, 0)).x()
+
+        frame = dialog.frameGeometry()
+        width = max(frame.width(), dialog.sizeHint().width(), dialog.width())
+        height = max(frame.height(), dialog.sizeHint().height(), dialog.height())
+        margin = 12
+        screen = QApplication.screenAt(anchor_top) or QApplication.primaryScreen()
+        if screen is not None:
+            available = screen.availableGeometry()
+            x = clamp_int(option_left, available.left(), max(available.left(), available.right() - width + 1))
+            y = anchor_top.y() - height - margin
+            y = clamp_int(y, available.top() + margin, max(available.top() + margin, available.bottom() - height + 1))
+            dialog.move(x, y)
+        else:
+            dialog.move(option_left, max(0, anchor_top.y() - height - margin))
+
     def choose_center_line_color(self) -> None:
         current = QColor(self.center_line_color)
         dialog = QColorDialog(current, self)
@@ -1783,27 +1803,11 @@ class MainWindow(QMainWindow):
         dialog.setCurrentColor(current)
         dialog.adjustSize()
 
-        anchor_widget = self.center_line_color_edit if hasattr(self, "center_line_color_edit") else self.center_line_color_btn
-        anchor_top = anchor_widget.mapToGlobal(QPoint(0, 0))
-        anchor_bottom = anchor_widget.mapToGlobal(QPoint(0, anchor_widget.height()))
-        option_left_widget = getattr(self, "controls_host", self.sidebar)
-        option_left = option_left_widget.mapToGlobal(QPoint(0, 0)).x()
-
-        size = dialog.sizeHint()
-        width = max(size.width(), dialog.width())
-        height = max(size.height(), dialog.height())
-        screen = QApplication.screenAt(anchor_top) or QApplication.primaryScreen()
-        if screen is not None:
-            available = screen.availableGeometry()
-            x = clamp_int(option_left, available.left(), max(available.left(), available.right() - width + 1))
-            y_above = anchor_top.y() - height - 8
-            if y_above >= available.top():
-                y = y_above
-            else:
-                y = min(max(available.top(), anchor_bottom.y() + 8), max(available.top(), available.bottom() - height + 1))
-            dialog.move(x, y)
-        else:
-            dialog.move(option_left, anchor_top.y() - height - 8)
+        # 初回計算のsizeHintだけではWindows上の実サイズとズレることがある。
+        # まず暫定位置へ移動し、表示直後に実フレームサイズで再配置する。
+        # 基準は「中心線グループ」ではなく、ユーザーが押した色入力欄そのもの。
+        self._move_center_line_color_dialog(dialog)
+        QTimer.singleShot(0, lambda d=dialog: self._move_center_line_color_dialog(d))
 
         if not dialog.exec():
             return
