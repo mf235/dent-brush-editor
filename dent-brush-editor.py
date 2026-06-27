@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Dent Brush Editor v0.3.2
+Dent Brush Editor v0.3.3
 ブラシでなぞった部分に凹み・食い込み風の陰影と変位を付ける画像編集ツール。
 
 Required libraries:
@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Callable, Dict, Iterable, List, Optional, Tuple
 
 APP_NAME = "Dent Brush Editor"
-APP_VERSION = "0.3.2"
+APP_VERSION = "0.3.3"
 SETTINGS_NAME = "dent-brush-editor-settings.json"
 SUPPORTED_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
 DEFAULT_CENTER_LINE_COLOR = "#000000"
@@ -299,50 +299,98 @@ def decode_rgba_png_base64(text_b64: str) -> np.ndarray:
     return rgba
 
 
+def iter_stroke_samples(points: List[Tuple[float, float]], spacing_px: float) -> Iterable[Tuple[float, float, float, float]]:
+    if not points:
+        return
+    spacing_px = max(0.25, float(spacing_px))
+    total = 0.0
+    for (x0, y0), (x1, y1) in zip(points, points[1:]):
+        total += math.hypot(x1 - x0, y1 - y0)
+    if total <= 0.0001:
+        x, y = points[0]
+        yield x, y, 0.0, 0.0
+        return
+    traveled = 0.0
+    first_x, first_y = points[0]
+    yield first_x, first_y, 0.0, total
+    for (x0, y0), (x1, y1) in zip(points, points[1:]):
+        dx = x1 - x0
+        dy = y1 - y0
+        dist = math.hypot(dx, dy)
+        if dist <= 0.0001:
+            continue
+        steps = max(1, int(math.ceil(dist / spacing_px)))
+        for i in range(1, steps + 1):
+            t = i / steps
+            x = x0 + dx * t
+            y = y0 + dy * t
+            yield x, y, min(total, traveled + dist * t), total
+        traveled += dist
+
+
+def smoothstep01(value: float) -> float:
+    value = max(0.0, min(1.0, float(value)))
+    return value * value * (3.0 - 2.0 * value)
+
+
+def stroke_taper_scale(distance: float, total: float, base_size: float) -> float:
+    if total <= 0.0001:
+        return 0.35
+    taper_len = min(max(float(base_size) * 2.25, 1.0), total * 0.5)
+    if taper_len <= 0.0001:
+        return 1.0
+    edge = min(distance, max(0.0, total - distance))
+    scale = smoothstep01(edge / taper_len)
+    if scale <= 0.025:
+        return 0.0
+    return max(0.10, min(1.0, scale))
+
+
+def blend_tapered_stroke(mask: np.ndarray, stroke: StrokeRecord) -> None:
+    points = stroke.points
+    if not points:
+        return
+    base_size = max(1, int(stroke.brush_size))
+    spacing_px = max(0.75, base_size * stroke.brush_spacing / 100.0)
+    stamp_cache: Dict[int, np.ndarray] = {}
+    for x, y, distance, total in iter_stroke_samples(points, spacing_px):
+        scale = stroke_taper_scale(distance, total, base_size)
+        if scale <= 0.0:
+            continue
+        scaled_size = max(1, int(round(base_size * scale)))
+        stamp = stamp_cache.get(scaled_size)
+        if stamp is None:
+            stamp = create_brush_stamp(scaled_size, stroke.brush_hardness, stroke.brush_opacity)
+            stamp_cache[scaled_size] = stamp
+        blend_stamp(mask, stamp, x, y, stroke.erase)
+
+
 def replay_mask_from_strokes(shape: Tuple[int, int], strokes: Iterable[StrokeRecord]) -> np.ndarray:
     mask = np.zeros(shape, dtype=np.uint8)
-    stamp_cache: Dict[Tuple[int, int, int], np.ndarray] = {}
     for stroke in strokes:
-        points = stroke.points
-        if not points:
-            continue
-        stamp_key = (stroke.brush_size, stroke.brush_hardness, stroke.brush_opacity)
-        stamp = stamp_cache.get(stamp_key)
-        if stamp is None:
-            stamp = create_brush_stamp(*stamp_key)
-            stamp_cache[stamp_key] = stamp
-        spacing_px = max(1.0, stroke.brush_size * stroke.brush_spacing / 100.0)
-        blend_stamp(mask, stamp, points[0][0], points[0][1], stroke.erase)
-        last_x, last_y = points[0]
-        for x, y in points[1:]:
-            dx = x - last_x
-            dy = y - last_y
-            dist = math.hypot(dx, dy)
-            steps = max(1, int(dist / spacing_px))
-            for i in range(1, steps + 1):
-                t = i / steps
-                px = last_x + dx * t
-                py = last_y + dy * t
-                blend_stamp(mask, stamp, px, py, stroke.erase)
-            last_x, last_y = x, y
+        blend_tapered_stroke(mask, stroke)
     return mask
 
 
 def build_center_line_mask(shape: Tuple[int, int], strokes: Iterable[StrokeRecord], width: int) -> np.ndarray:
     mask = np.zeros(shape, dtype=np.uint8)
-    thickness = max(1, int(width))
+    base_width = max(1, int(width))
     for stroke in strokes:
-        pts = stroke.points
-        if not pts:
+        points = stroke.points
+        if not points:
             continue
-        points = np.array([[int(round(x)), int(round(y))] for x, y in pts], dtype=np.int32)
-        color = 0 if stroke.erase else 255
-        if len(points) == 1:
-            cv2.circle(mask, tuple(points[0]), max(1, thickness // 2), color, thickness=-1, lineType=cv2.LINE_AA)
-        else:
-            cv2.polylines(mask, [points.reshape((-1, 1, 2))], False, color, thickness=thickness, lineType=cv2.LINE_AA)
-            cv2.circle(mask, tuple(points[0]), max(1, thickness // 2), color, thickness=-1, lineType=cv2.LINE_AA)
-            cv2.circle(mask, tuple(points[-1]), max(1, thickness // 2), color, thickness=-1, lineType=cv2.LINE_AA)
+        spacing_px = max(0.5, base_width * 0.45)
+        stamp_cache: Dict[int, np.ndarray] = {}
+        for x, y, distance, total in iter_stroke_samples(points, spacing_px):
+            scale = stroke_taper_scale(distance, total, max(base_width, stroke.brush_size * 0.35))
+            if scale <= 0.0:
+                continue
+            scaled_width = max(1, int(round(base_width * scale)))
+            stamp = stamp_cache.get(scaled_width)
+            if stamp is None:
+                stamp = create_brush_stamp(scaled_width, 85, 100)
+                stamp_cache[scaled_width] = stamp
+            blend_stamp(mask, stamp, x, y, stroke.erase)
     return mask
 
 
@@ -2060,24 +2108,22 @@ class MainWindow(QMainWindow):
     def on_stroke_finished(self) -> None:
         if self.mask is None:
             return
-        if self._stroke_before_state is not None:
-            before_mask = self._stroke_before_state.get("mask")
-            if isinstance(before_mask, np.ndarray) and not np.array_equal(before_mask, self.mask):
-                self.undo_stack.append(self._stroke_before_state)
-                if len(self.undo_stack) > self.max_undo:
-                    self.undo_stack.pop(0)
-                self.redo_stack.clear()
-                if self._current_stroke_points:
-                    self.stroke_history.append(
-                        StrokeRecord(
-                            erase=self._current_stroke_erase,
-                            points=list(self._current_stroke_points),
-                            brush_size=self.params.brush_size,
-                            brush_hardness=self.params.brush_hardness,
-                            brush_opacity=self.params.brush_opacity,
-                            brush_spacing=self.params.brush_spacing,
-                        )
-                    )
+        if self._stroke_before_state is not None and self._current_stroke_points:
+            self.undo_stack.append(self._stroke_before_state)
+            if len(self.undo_stack) > self.max_undo:
+                self.undo_stack.pop(0)
+            self.redo_stack.clear()
+            self.stroke_history.append(
+                StrokeRecord(
+                    erase=self._current_stroke_erase,
+                    points=list(self._current_stroke_points),
+                    brush_size=self.params.brush_size,
+                    brush_hardness=self.params.brush_hardness,
+                    brush_opacity=self.params.brush_opacity,
+                    brush_spacing=self.params.brush_spacing,
+                )
+            )
+            self.mask = replay_mask_from_strokes(self.original_rgba.shape[:2], self.stroke_history)
         self._stroke_before_state = None
         self._current_stroke_points = []
         self._stroke_active = False
