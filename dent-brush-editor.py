@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Dent Brush Editor v0.3.5
+Dent Brush Editor v0.3.6
 ブラシでなぞった部分に凹み・食い込み風の陰影と変位を付ける画像編集ツール。
 
 Required libraries:
@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Callable, Dict, Iterable, List, Optional, Tuple
 
 APP_NAME = "Dent Brush Editor"
-APP_VERSION = "0.3.5"
+APP_VERSION = "0.3.6"
 SETTINGS_NAME = "dent-brush-editor-settings.json"
 SUPPORTED_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
 DEFAULT_CENTER_LINE_COLOR = "#000000"
@@ -165,6 +165,11 @@ def qimage_to_rgba(qimg: QImage) -> np.ndarray:
     ptr = img.bits()
     arr = np.frombuffer(ptr, dtype=np.uint8).reshape((h, img.bytesPerLine()))[:, : w * 4]
     return arr.reshape((h, w, 4)).copy()
+
+
+def is_project_file_path(path: Path) -> bool:
+    name = path.name.lower()
+    return name.endswith(".dent.json") or path.suffix.lower() == ".json"
 
 
 def unique_output_path(src: Optional[Path], suffix: str = ".png") -> Path:
@@ -1074,9 +1079,11 @@ class ImageCanvas(QWidget):
     def dragEnterEvent(self, event: QDragEnterEvent) -> None:  # type: ignore[override]
         if event.mimeData().hasUrls():
             for url in event.mimeData().urls():
-                if url.isLocalFile() and Path(url.toLocalFile()).suffix.lower() in SUPPORTED_EXTS:
-                    event.acceptProposedAction()
-                    return
+                if url.isLocalFile():
+                    path = Path(url.toLocalFile())
+                    if path.suffix.lower() in SUPPORTED_EXTS or is_project_file_path(path):
+                        event.acceptProposedAction()
+                        return
         event.ignore()
 
     def dropEvent(self, event: QDropEvent) -> None:  # type: ignore[override]
@@ -1084,7 +1091,7 @@ class ImageCanvas(QWidget):
             for url in event.mimeData().urls():
                 if url.isLocalFile():
                     path = Path(url.toLocalFile())
-                    if path.suffix.lower() in SUPPORTED_EXTS:
+                    if path.suffix.lower() in SUPPORTED_EXTS or is_project_file_path(path):
                         self.fileDropped.emit(str(path))
                         event.acceptProposedAction()
                         return
@@ -1290,7 +1297,7 @@ class MainWindow(QMainWindow):
         self.canvas.strokeFinished.connect(self.on_stroke_finished)
         self.canvas.zoomChanged.connect(self.on_zoom_changed)
         self.canvas.contextMenuRequestedAt.connect(self.show_canvas_context_menu)
-        self.canvas.fileDropped.connect(lambda p: self.load_image_path(Path(p)))
+        self.canvas.fileDropped.connect(lambda p: self.load_dropped_path(Path(p)))
 
         self.sidebar = QWidget()
         side_layout = QVBoxLayout(self.sidebar)
@@ -1335,6 +1342,7 @@ class MainWindow(QMainWindow):
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         controls_host = QWidget()
+        self.controls_host = controls_host
         controls_layout = QVBoxLayout(controls_host)
         controls_layout.setContentsMargins(0, 0, 0, 0)
         controls_layout.setSpacing(8)
@@ -1767,7 +1775,39 @@ class MainWindow(QMainWindow):
 
     def choose_center_line_color(self) -> None:
         current = QColor(self.center_line_color)
-        color = QColorDialog.getColor(current, self, "中心線の色")
+        dialog = QColorDialog(current, self)
+        dialog.setWindowTitle("中心線の色")
+        dont_use_native = getattr(QColorDialog.ColorDialogOption, "DontUseNativeDialog", None)
+        if dont_use_native is not None:
+            dialog.setOption(dont_use_native, True)
+        dialog.setCurrentColor(current)
+        dialog.adjustSize()
+
+        anchor_widget = self.center_line_color_edit if hasattr(self, "center_line_color_edit") else self.center_line_color_btn
+        anchor_top = anchor_widget.mapToGlobal(QPoint(0, 0))
+        anchor_bottom = anchor_widget.mapToGlobal(QPoint(0, anchor_widget.height()))
+        option_left_widget = getattr(self, "controls_host", self.sidebar)
+        option_left = option_left_widget.mapToGlobal(QPoint(0, 0)).x()
+
+        size = dialog.sizeHint()
+        width = max(size.width(), dialog.width())
+        height = max(size.height(), dialog.height())
+        screen = QApplication.screenAt(anchor_top) or QApplication.primaryScreen()
+        if screen is not None:
+            available = screen.availableGeometry()
+            x = clamp_int(option_left, available.left(), max(available.left(), available.right() - width + 1))
+            y_above = anchor_top.y() - height - 8
+            if y_above >= available.top():
+                y = y_above
+            else:
+                y = min(max(available.top(), anchor_bottom.y() + 8), max(available.top(), available.bottom() - height + 1))
+            dialog.move(x, y)
+        else:
+            dialog.move(option_left, anchor_top.y() - height - 8)
+
+        if not dialog.exec():
+            return
+        color = dialog.selectedColor()
         if not color.isValid():
             return
         self.center_line_color = normalize_hex_color(color.name(QColor.NameFormat.HexRgb), self.center_line_color)
@@ -1924,9 +1964,11 @@ class MainWindow(QMainWindow):
     def dragEnterEvent(self, event: QDragEnterEvent) -> None:  # type: ignore[override]
         if event.mimeData().hasUrls():
             for url in event.mimeData().urls():
-                if url.isLocalFile() and Path(url.toLocalFile()).suffix.lower() in SUPPORTED_EXTS:
-                    event.acceptProposedAction()
-                    return
+                if url.isLocalFile():
+                    path = Path(url.toLocalFile())
+                    if path.suffix.lower() in SUPPORTED_EXTS or is_project_file_path(path):
+                        event.acceptProposedAction()
+                        return
         event.ignore()
 
     def dropEvent(self, event: QDropEvent) -> None:  # type: ignore[override]
@@ -1936,10 +1978,19 @@ class MainWindow(QMainWindow):
             if not url.isLocalFile():
                 continue
             path = Path(url.toLocalFile())
-            if path.suffix.lower() in SUPPORTED_EXTS:
-                self.load_image_path(path)
+            if path.suffix.lower() in SUPPORTED_EXTS or is_project_file_path(path):
+                self.load_dropped_path(path)
                 event.acceptProposedAction()
                 return
+        self.statusBar().showMessage("対応していないファイルです。", 5000)
+
+    def load_dropped_path(self, path: Path) -> None:
+        if is_project_file_path(path):
+            self.load_project_path(path)
+            return
+        if path.suffix.lower() in SUPPORTED_EXTS:
+            self.load_image_path(path)
+            return
         self.statusBar().showMessage("対応していないファイルです。", 5000)
 
     def open_image_dialog(self) -> None:
