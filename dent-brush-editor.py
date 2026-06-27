@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Dent Brush Editor v0.3.0
+Dent Brush Editor v0.3.1
 ブラシでなぞった部分に凹み・食い込み風の陰影と変位を付ける画像編集ツール。
 
 Required libraries:
@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Callable, Dict, Iterable, List, Optional, Tuple
 
 APP_NAME = "Dent Brush Editor"
-APP_VERSION = "0.3.0"
+APP_VERSION = "0.3.1"
 SETTINGS_NAME = "dent-brush-editor-settings.json"
 SUPPORTED_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
 DEFAULT_CENTER_LINE_COLOR = "#000000"
@@ -1266,36 +1266,6 @@ class MainWindow(QMainWindow):
                 ("inner_dark", "内部の暗さ", "inner_dark"),
             ],
         )
-        final_blur_group = QGroupBox("最終ぼかし")
-        final_blur_layout = QVBoxLayout(final_blur_group)
-        final_blur_layout.setContentsMargins(8, 8, 8, 8)
-        self.final_blur_enabled_check = QCheckBox("有効")
-        self.final_blur_enabled_check.setChecked(bool(self.params.final_blur_enabled))
-        self.final_blur_enabled_check.toggled.connect(self.on_final_blur_enabled_toggled)
-        final_blur_layout.addWidget(self.final_blur_enabled_check)
-        final_blur_size_control = ParamControl(
-            "final_blur_size",
-            "サイズ",
-            PARAM_RANGES["final_blur_size"][0],
-            PARAM_RANGES["final_blur_size"][1],
-            getattr(self.params, "final_blur_size"),
-        )
-        final_blur_size_control.valueChanged.connect(self.on_param_changed)
-        self.param_controls["final_blur_size"] = final_blur_size_control
-        final_blur_layout.addWidget(final_blur_size_control)
-        final_blur_strength_control = ParamControl(
-            "final_blur_strength",
-            "強度",
-            PARAM_RANGES["final_blur_strength"][0],
-            PARAM_RANGES["final_blur_strength"][1],
-            getattr(self.params, "final_blur_strength"),
-        )
-        final_blur_strength_control.valueChanged.connect(self.on_param_changed)
-        self.param_controls["final_blur_strength"] = final_blur_strength_control
-        final_blur_layout.addWidget(final_blur_strength_control)
-        controls_layout.addWidget(final_blur_group)
-        self.final_blur_group = final_blur_group
-
         center_line_group = QGroupBox("中心線")
         center_line_layout = QVBoxLayout(center_line_group)
         center_line_layout.setContentsMargins(8, 8, 8, 8)
@@ -1338,6 +1308,37 @@ class MainWindow(QMainWindow):
         self.center_line_group = center_line_group
         self._update_center_line_color_widgets()
         self._update_effect_group_enabled_states()
+
+        final_blur_group = QGroupBox("最終ぼかし")
+        final_blur_layout = QVBoxLayout(final_blur_group)
+        final_blur_layout.setContentsMargins(8, 8, 8, 8)
+        self.final_blur_enabled_check = QCheckBox("有効")
+        self.final_blur_enabled_check.setChecked(bool(self.params.final_blur_enabled))
+        self.final_blur_enabled_check.toggled.connect(self.on_final_blur_enabled_toggled)
+        final_blur_layout.addWidget(self.final_blur_enabled_check)
+        final_blur_size_control = ParamControl(
+            "final_blur_size",
+            "サイズ",
+            PARAM_RANGES["final_blur_size"][0],
+            PARAM_RANGES["final_blur_size"][1],
+            getattr(self.params, "final_blur_size"),
+        )
+        final_blur_size_control.valueChanged.connect(self.on_param_changed)
+        self.param_controls["final_blur_size"] = final_blur_size_control
+        final_blur_layout.addWidget(final_blur_size_control)
+        final_blur_strength_control = ParamControl(
+            "final_blur_strength",
+            "強度",
+            PARAM_RANGES["final_blur_strength"][0],
+            PARAM_RANGES["final_blur_strength"][1],
+            getattr(self.params, "final_blur_strength"),
+        )
+        final_blur_strength_control.valueChanged.connect(self.on_param_changed)
+        self.param_controls["final_blur_strength"] = final_blur_strength_control
+        final_blur_layout.addWidget(final_blur_strength_control)
+        controls_layout.addWidget(final_blur_group)
+        self.final_blur_group = final_blur_group
+
         self._add_group(
             controls_layout,
             "保存品質",
