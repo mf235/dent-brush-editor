@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Dent Brush Editor v0.3.3
+Dent Brush Editor v0.3.4
 ブラシでなぞった部分に凹み・食い込み風の陰影と変位を付ける画像編集ツール。
 
 Required libraries:
@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Callable, Dict, Iterable, List, Optional, Tuple
 
 APP_NAME = "Dent Brush Editor"
-APP_VERSION = "0.3.3"
+APP_VERSION = "0.3.4"
 SETTINGS_NAME = "dent-brush-editor-settings.json"
 SUPPORTED_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
 DEFAULT_CENTER_LINE_COLOR = "#000000"
@@ -353,6 +353,7 @@ def blend_tapered_stroke(mask: np.ndarray, stroke: StrokeRecord) -> None:
     base_size = max(1, int(stroke.brush_size))
     spacing_px = max(0.75, base_size * stroke.brush_spacing / 100.0)
     stamp_cache: Dict[int, np.ndarray] = {}
+    stamp_opacity = 100 if stroke.erase else stroke.brush_opacity
     for x, y, distance, total in iter_stroke_samples(points, spacing_px):
         scale = stroke_taper_scale(distance, total, base_size)
         if scale <= 0.0:
@@ -360,9 +361,30 @@ def blend_tapered_stroke(mask: np.ndarray, stroke: StrokeRecord) -> None:
         scaled_size = max(1, int(round(base_size * scale)))
         stamp = stamp_cache.get(scaled_size)
         if stamp is None:
-            stamp = create_brush_stamp(scaled_size, stroke.brush_hardness, stroke.brush_opacity)
+            stamp = create_brush_stamp(scaled_size, stroke.brush_hardness, stamp_opacity)
             stamp_cache[scaled_size] = stamp
         blend_stamp(mask, stamp, x, y, stroke.erase)
+
+
+def build_stroke_area_mask(shape: Tuple[int, int], stroke: StrokeRecord) -> np.ndarray:
+    area = np.zeros(shape, dtype=np.uint8)
+    area_stroke = StrokeRecord(
+        erase=False,
+        points=list(stroke.points),
+        brush_size=stroke.brush_size,
+        brush_hardness=stroke.brush_hardness,
+        brush_opacity=100,
+        brush_spacing=stroke.brush_spacing,
+    )
+    blend_tapered_stroke(area, area_stroke)
+    return area
+
+
+def erase_mask_by_area(mask: np.ndarray, area: np.ndarray) -> None:
+    if area.size == 0 or not np.any(area):
+        return
+    remaining = mask.astype(np.float32) * (1.0 - (area.astype(np.float32) / 255.0))
+    mask[:, :] = np.rint(np.clip(remaining, 0, 255)).astype(np.uint8)
 
 
 def replay_mask_from_strokes(shape: Tuple[int, int], strokes: Iterable[StrokeRecord]) -> np.ndarray:
@@ -379,6 +401,10 @@ def build_center_line_mask(shape: Tuple[int, int], strokes: Iterable[StrokeRecor
         points = stroke.points
         if not points:
             continue
+        if stroke.erase:
+            erase_area = build_stroke_area_mask(shape, stroke)
+            erase_mask_by_area(mask, erase_area)
+            continue
         spacing_px = max(0.5, base_width * 0.45)
         stamp_cache: Dict[int, np.ndarray] = {}
         for x, y, distance, total in iter_stroke_samples(points, spacing_px):
@@ -390,7 +416,7 @@ def build_center_line_mask(shape: Tuple[int, int], strokes: Iterable[StrokeRecor
             if stamp is None:
                 stamp = create_brush_stamp(scaled_width, 85, 100)
                 stamp_cache[scaled_width] = stamp
-            blend_stamp(mask, stamp, x, y, stroke.erase)
+            blend_stamp(mask, stamp, x, y, False)
     return mask
 
 
@@ -689,8 +715,9 @@ def blend_stamp(mask: np.ndarray, stamp: np.ndarray, cx: float, cy: float, erase
     sub = mask[iy0:iy1, ix0:ix1]
     alpha = stamp[sy0:sy1, sx0:sx1]
     if erase:
-        reduced = sub.astype(np.int16) - alpha.astype(np.int16)
-        mask[iy0:iy1, ix0:ix1] = np.clip(reduced, 0, 255).astype(np.uint8)
+        clear = alpha.astype(np.float32) / 255.0
+        reduced = sub.astype(np.float32) * (1.0 - clear)
+        mask[iy0:iy1, ix0:ix1] = np.rint(np.clip(reduced, 0, 255)).astype(np.uint8)
     else:
         mask[iy0:iy1, ix0:ix1] = np.maximum(sub, alpha)
 
@@ -2025,13 +2052,14 @@ class MainWindow(QMainWindow):
             f"Undo {len(self.undo_stack)} / Redo {len(self.redo_stack)}"
         )
 
-    def current_brush_stamp(self) -> np.ndarray:
-        key = (self.params.brush_size, self.params.brush_hardness, self.params.brush_opacity)
+    def current_brush_stamp(self, erase: bool = False) -> np.ndarray:
+        opacity = 100 if erase else self.params.brush_opacity
+        key = (self.params.brush_size, self.params.brush_hardness, opacity)
         if self._brush_stamp_cache_key != key or self._brush_stamp_cache is None:
             self._brush_stamp_cache = create_brush_stamp(
                 self.params.brush_size,
                 self.params.brush_hardness,
-                self.params.brush_opacity,
+                opacity,
             )
             self._brush_stamp_cache_key = key
         return self._brush_stamp_cache
@@ -2085,7 +2113,7 @@ class MainWindow(QMainWindow):
             x, y = sx, sy
         self._smoothed_paint = (x, y)
 
-        stamp = self.current_brush_stamp()
+        stamp = self.current_brush_stamp(erase=erase)
         spacing_px = max(1.0, self.params.brush_size * self.params.brush_spacing / 100.0)
         if self._last_paint is None:
             blend_stamp(self.mask, stamp, x, y, erase)
@@ -2119,7 +2147,7 @@ class MainWindow(QMainWindow):
                     points=list(self._current_stroke_points),
                     brush_size=self.params.brush_size,
                     brush_hardness=self.params.brush_hardness,
-                    brush_opacity=self.params.brush_opacity,
+                    brush_opacity=100 if self._current_stroke_erase else self.params.brush_opacity,
                     brush_spacing=self.params.brush_spacing,
                 )
             )
