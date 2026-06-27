@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Dent Brush Editor v0.3.1
+Dent Brush Editor v0.3.2
 ブラシでなぞった部分に凹み・食い込み風の陰影と変位を付ける画像編集ツール。
 
 Required libraries:
@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Callable, Dict, Iterable, List, Optional, Tuple
 
 APP_NAME = "Dent Brush Editor"
-APP_VERSION = "0.3.1"
+APP_VERSION = "0.3.2"
 SETTINGS_NAME = "dent-brush-editor-settings.json"
 SUPPORTED_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
 DEFAULT_CENTER_LINE_COLOR = "#000000"
@@ -344,6 +344,25 @@ def build_center_line_mask(shape: Tuple[int, int], strokes: Iterable[StrokeRecor
             cv2.circle(mask, tuple(points[0]), max(1, thickness // 2), color, thickness=-1, lineType=cv2.LINE_AA)
             cv2.circle(mask, tuple(points[-1]), max(1, thickness // 2), color, thickness=-1, lineType=cv2.LINE_AA)
     return mask
+
+
+def build_center_line_mask_from_effect_mask(mask_u8: np.ndarray, width: int) -> np.ndarray:
+    """Compatibility fallback for edits that do not have stroke history.
+
+    New edits use actual stroke centerlines. This fallback is only used when a
+    project/image was edited before stroke history existed, or when history is
+    otherwise unavailable.
+    """
+    region = (mask_u8 > 0).astype(np.uint8)
+    if not np.any(region):
+        return np.zeros_like(mask_u8, dtype=np.uint8)
+    skeleton = skeletonize_binary_mask(region)
+    if not np.any(skeleton):
+        return np.zeros_like(mask_u8, dtype=np.uint8)
+    thickness = max(1, int(width))
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (thickness, thickness))
+    line_mask = cv2.dilate(skeleton, kernel, iterations=1)
+    return np.bitwise_and(line_mask, region * 255)
 
 
 PARAM_RANGES: Dict[str, Tuple[int, int]] = {
@@ -746,8 +765,12 @@ def apply_dent_effect(original_rgba: np.ndarray, mask_u8: np.ndarray, params: To
     out = np.dstack([out_rgb, out_alpha])
     out = np.rint(np.clip(out, 0, 255)).astype(np.uint8)
 
-    if params.center_line_enabled and params.center_line_width > 0 and params.center_line_opacity > 0 and stroke_records is not None:
-        line_mask = build_center_line_mask(mask_u8.shape[:2], stroke_records, params.center_line_width)
+    if params.center_line_enabled and params.center_line_width > 0 and params.center_line_opacity > 0:
+        stroke_list = list(stroke_records or [])
+        if stroke_list:
+            line_mask = build_center_line_mask(mask_u8.shape[:2], stroke_list, params.center_line_width)
+        else:
+            line_mask = build_center_line_mask_from_effect_mask(mask_u8, params.center_line_width)
         if np.any(line_mask):
             line_blend = (line_mask.astype(np.float32) / 255.0) * (params.center_line_opacity / 100.0)
             if np.any(line_blend > 0):
@@ -1609,7 +1632,7 @@ class MainWindow(QMainWindow):
         self.center_line_color = new_color
         self._update_center_line_color_widgets()
         if changed:
-            self.schedule_render()
+            self.request_render()
             self._save_settings()
             self.statusBar().showMessage(f"中心線の色を変更しました: {self.center_line_color}", 3000)
 
@@ -1620,7 +1643,7 @@ class MainWindow(QMainWindow):
             return
         self.center_line_color = normalize_hex_color(color.name(QColor.NameFormat.HexRgb), self.center_line_color)
         self._update_center_line_color_widgets()
-        self.schedule_render()
+        self.request_render()
         self._save_settings()
         self.statusBar().showMessage(f"中心線の色を変更しました: {self.center_line_color}", 3000)
 
