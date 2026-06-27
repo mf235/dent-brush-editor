@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Dent Brush Editor v0.3.8
+凹み加工ツール v0.3.9
 ブラシでなぞった部分に凹み・食い込み風の陰影と変位を付ける画像編集ツール。
 
 Required libraries:
@@ -20,12 +20,12 @@ from dataclasses import dataclass, asdict
 from pathlib import Path
 from typing import Callable, Dict, Iterable, List, Optional, Tuple
 
-APP_NAME = "Dent Brush Editor"
-APP_VERSION = "0.3.8"
+APP_NAME = "凹み加工ツール"
+APP_VERSION = "0.3.9"
 SETTINGS_NAME = "dent-brush-editor-settings.json"
 SUPPORTED_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
 DEFAULT_CENTER_LINE_COLOR = "#000000"
-PROJECT_FILE_FILTER = "Dent Project (*.dent.json);;JSON (*.json)"
+PROJECT_FILE_FILTER = "凹み加工プロジェクト (*.dent.json);;JSON (*.json)"
 ERASER_HARDNESS = 100
 ERASER_OPACITY = 100
 ERASER_SPACING = 15
