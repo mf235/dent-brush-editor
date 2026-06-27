@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Dent Brush Editor v0.3.4
+Dent Brush Editor v0.3.5
 ブラシでなぞった部分に凹み・食い込み風の陰影と変位を付ける画像編集ツール。
 
 Required libraries:
@@ -21,11 +21,14 @@ from pathlib import Path
 from typing import Callable, Dict, Iterable, List, Optional, Tuple
 
 APP_NAME = "Dent Brush Editor"
-APP_VERSION = "0.3.4"
+APP_VERSION = "0.3.5"
 SETTINGS_NAME = "dent-brush-editor-settings.json"
 SUPPORTED_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
 DEFAULT_CENTER_LINE_COLOR = "#000000"
 PROJECT_FILE_FILTER = "Dent Project (*.dent.json);;JSON (*.json)"
+ERASER_HARDNESS = 100
+ERASER_OPACITY = 100
+ERASER_SPACING = 15
 
 try:
     import numpy as np
@@ -180,6 +183,7 @@ def unique_output_path(src: Optional[Path], suffix: str = ".png") -> Path:
 @dataclass
 class ToolParams:
     brush_size: int = 5
+    eraser_size: int = 40
     brush_hardness: int = 62
     brush_opacity: int = 72
     brush_spacing: int = 15
@@ -441,6 +445,7 @@ def build_center_line_mask_from_effect_mask(mask_u8: np.ndarray, width: int) -> 
 
 PARAM_RANGES: Dict[str, Tuple[int, int]] = {
     "brush_size": (1, 300),
+    "eraser_size": (1, 300),
     "brush_hardness": (0, 100),
     "brush_opacity": (1, 100),
     "brush_spacing": (1, 100),
@@ -470,6 +475,7 @@ PARAM_RANGES: Dict[str, Tuple[int, int]] = {
 
 PRESETS: Dict[str, Dict[str, int]] = {
     "弱め": {
+        "eraser_size": 40,
         "brush_hardness": 25,
         "brush_opacity": 35,
         "depth": 14,
@@ -488,6 +494,7 @@ PRESETS: Dict[str, Dict[str, int]] = {
         "inner_dark": 10,
     },
     "標準": {
+        "eraser_size": 40,
         "brush_size": 5,
         "brush_hardness": 62,
         "brush_opacity": 72,
@@ -514,6 +521,7 @@ PRESETS: Dict[str, Dict[str, int]] = {
         "center_line_opacity": 100,
     },
     "強め": {
+        "eraser_size": 40,
         "brush_hardness": 45,
         "brush_opacity": 70,
         "depth": 45,
@@ -532,6 +540,7 @@ PRESETS: Dict[str, Dict[str, int]] = {
         "inner_dark": 36,
     },
     "細い食い込み": {
+        "eraser_size": 40,
         "brush_size": 18,
         "brush_hardness": 62,
         "brush_opacity": 72,
@@ -551,6 +560,7 @@ PRESETS: Dict[str, Dict[str, int]] = {
         "inner_dark": 35,
     },
     "柔らかい押し跡": {
+        "eraser_size": 40,
         "brush_size": 80,
         "brush_hardness": 15,
         "brush_opacity": 45,
@@ -570,6 +580,7 @@ PRESETS: Dict[str, Dict[str, int]] = {
         "inner_dark": 16,
     },
     "硬い刻み": {
+        "eraser_size": 40,
         "brush_size": 24,
         "brush_hardness": 85,
         "brush_opacity": 86,
@@ -1607,7 +1618,7 @@ class MainWindow(QMainWindow):
             self.center_line_enabled_check.setChecked(bool(self.params.center_line_enabled))
             self.center_line_enabled_check.blockSignals(False)
         self._update_effect_group_enabled_states()
-        self.canvas.set_brush_size(self.params.brush_size)
+        self.canvas.set_brush_size(self._active_tool_size())
 
     def _safe_window_pos(self, x: int, y: int, w: int, h: int) -> QPoint:
         app = QApplication.instance()
@@ -1640,9 +1651,28 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             self.statusBar().showMessage(f"設定保存に失敗しました: {exc}", 7000)
 
+    def _is_eraser_tool(self) -> bool:
+        return getattr(self.canvas, "tool", "brush") == "eraser"
+
+    def _active_tool_size(self) -> int:
+        return int(self.params.eraser_size if self._is_eraser_tool() else self.params.brush_size)
+
+    def _active_stroke_runtime_params(self, erase: bool) -> Tuple[int, int, int, int]:
+        if erase:
+            return int(self.params.eraser_size), ERASER_HARDNESS, ERASER_OPACITY, ERASER_SPACING
+        return (
+            int(self.params.brush_size),
+            int(self.params.brush_hardness),
+            int(self.params.brush_opacity),
+            int(self.params.brush_spacing),
+        )
+
     def _sync_param_controls(self) -> None:
         for key, control in self.param_controls.items():
-            control.set_value(getattr(self.params, key))
+            if key == "brush_size" and self._is_eraser_tool():
+                control.set_value(self.params.eraser_size)
+            else:
+                control.set_value(getattr(self.params, key))
 
     def _update_action_states(self) -> None:
         has_image = self.original_rgba is not None
@@ -1657,6 +1687,11 @@ class MainWindow(QMainWindow):
         self.canvas.set_tool(tool)
         self.brush_btn.setChecked(tool == "brush")
         self.eraser_btn.setChecked(tool == "eraser")
+        self._sync_param_controls()
+        self.canvas.set_brush_size(self._active_tool_size())
+        self._brush_stamp_cache_key = None
+        self._brush_stamp_cache = None
+        self._update_effect_group_enabled_states()
         names = {"brush": "凹みブラシ", "eraser": "消しゴム"}
         self.statusBar().showMessage(f"ツール: {names.get(tool, tool)}", 3000)
 
@@ -1678,12 +1713,31 @@ class MainWindow(QMainWindow):
             control.setEnabled(enabled)
 
     def _update_effect_group_enabled_states(self) -> None:
-        blur_enabled = bool(self.params.final_blur_enabled)
+        eraser_mode = self._is_eraser_tool()
+        self._set_control_enabled("brush_size", True)
+
+        # 消しゴムは独立したサイズだけを使う。凹みブラシ用の硬さ/適用量/間隔/補正や、
+        # 凹み・陰影・中心線・最終ぼかしの設定は消しゴム動作には影響させない。
+        tool_param_keys = {
+            "brush_hardness", "brush_opacity", "brush_spacing", "smoothing",
+            "depth", "displacement", "pull", "rim", "edge_blur", "texture_noise",
+            "shadow_strength", "highlight_strength", "light_angle", "shadow_blur",
+            "shadow_spread", "highlight_width", "inner_dark",
+        }
+        for key in tool_param_keys:
+            self._set_control_enabled(key, not eraser_mode)
+
+        blur_enabled = bool(self.params.final_blur_enabled) and not eraser_mode
         self._set_control_enabled("final_blur_size", blur_enabled)
         self._set_control_enabled("final_blur_strength", blur_enabled)
-        line_enabled = bool(self.params.center_line_enabled)
+        if hasattr(self, "final_blur_enabled_check"):
+            self.final_blur_enabled_check.setEnabled(not eraser_mode)
+
+        line_enabled = bool(self.params.center_line_enabled) and not eraser_mode
         self._set_control_enabled("center_line_width", line_enabled)
         self._set_control_enabled("center_line_opacity", line_enabled)
+        if hasattr(self, "center_line_enabled_check"):
+            self.center_line_enabled_check.setEnabled(not eraser_mode)
         if hasattr(self, "center_line_color_edit"):
             self.center_line_color_edit.setEnabled(line_enabled)
         if hasattr(self, "center_line_color_btn"):
@@ -1836,7 +1890,7 @@ class MainWindow(QMainWindow):
             self.center_line_enabled_check.setChecked(bool(self.params.center_line_enabled))
             self.center_line_enabled_check.blockSignals(False)
         self._update_effect_group_enabled_states()
-        self.canvas.set_brush_size(self.params.brush_size)
+        self.canvas.set_brush_size(self._active_tool_size())
         self._brush_stamp_cache_key = None
         self._brush_stamp_cache = None
         self.request_render()
@@ -1844,14 +1898,17 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(f"プリセットを適用しました: {name}", 3000)
 
     def on_param_changed(self, key: str, value: int) -> None:
-        setattr(self.params, key, value)
+        if key == "brush_size" and self._is_eraser_tool():
+            self.params.eraser_size = value
+        else:
+            setattr(self.params, key, value)
         self.params.clamp_all()
         if key == "brush_size":
-            self.canvas.set_brush_size(self.params.brush_size)
-        if key in {"brush_size", "brush_hardness", "brush_opacity"}:
+            self.canvas.set_brush_size(self._active_tool_size())
+        if key in {"brush_size", "eraser_size", "brush_hardness", "brush_opacity"}:
             self._brush_stamp_cache_key = None
             self._brush_stamp_cache = None
-        brush_only = {"brush_size", "brush_hardness", "brush_opacity", "brush_spacing", "smoothing"}
+        brush_only = {"brush_size", "eraser_size", "brush_hardness", "brush_opacity", "brush_spacing", "smoothing"}
         if (
             self.original_rgba is not None
             and key not in {"jpeg_quality", "webp_quality"}
@@ -2053,14 +2110,10 @@ class MainWindow(QMainWindow):
         )
 
     def current_brush_stamp(self, erase: bool = False) -> np.ndarray:
-        opacity = 100 if erase else self.params.brush_opacity
-        key = (self.params.brush_size, self.params.brush_hardness, opacity)
+        size, hardness, opacity, _spacing = self._active_stroke_runtime_params(erase)
+        key = (size, hardness, opacity)
         if self._brush_stamp_cache_key != key or self._brush_stamp_cache is None:
-            self._brush_stamp_cache = create_brush_stamp(
-                self.params.brush_size,
-                self.params.brush_hardness,
-                opacity,
-            )
+            self._brush_stamp_cache = create_brush_stamp(size, hardness, opacity)
             self._brush_stamp_cache_key = key
         return self._brush_stamp_cache
 
@@ -2106,7 +2159,8 @@ class MainWindow(QMainWindow):
             return
         x = max(0.0, min(float(self.mask.shape[1] - 1), x))
         y = max(0.0, min(float(self.mask.shape[0] - 1), y))
-        if self.params.smoothing > 0 and self._smoothed_paint is not None:
+        size, _hardness, _opacity, spacing = self._active_stroke_runtime_params(erase)
+        if (not erase) and self.params.smoothing > 0 and self._smoothed_paint is not None:
             a = 1.0 - (self.params.smoothing / 100.0) * 0.75
             sx = self._smoothed_paint[0] * (1.0 - a) + x * a
             sy = self._smoothed_paint[1] * (1.0 - a) + y * a
@@ -2114,7 +2168,7 @@ class MainWindow(QMainWindow):
         self._smoothed_paint = (x, y)
 
         stamp = self.current_brush_stamp(erase=erase)
-        spacing_px = max(1.0, self.params.brush_size * self.params.brush_spacing / 100.0)
+        spacing_px = max(1.0, size * spacing / 100.0)
         if self._last_paint is None:
             blend_stamp(self.mask, stamp, x, y, erase)
             self._last_paint = (x, y)
@@ -2145,10 +2199,10 @@ class MainWindow(QMainWindow):
                 StrokeRecord(
                     erase=self._current_stroke_erase,
                     points=list(self._current_stroke_points),
-                    brush_size=self.params.brush_size,
-                    brush_hardness=self.params.brush_hardness,
-                    brush_opacity=100 if self._current_stroke_erase else self.params.brush_opacity,
-                    brush_spacing=self.params.brush_spacing,
+                    brush_size=self.params.eraser_size if self._current_stroke_erase else self.params.brush_size,
+                    brush_hardness=ERASER_HARDNESS if self._current_stroke_erase else self.params.brush_hardness,
+                    brush_opacity=ERASER_OPACITY if self._current_stroke_erase else self.params.brush_opacity,
+                    brush_spacing=ERASER_SPACING if self._current_stroke_erase else self.params.brush_spacing,
                 )
             )
             self.mask = replay_mask_from_strokes(self.original_rgba.shape[:2], self.stroke_history)
